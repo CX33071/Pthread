@@ -1,5 +1,7 @@
 # C++特性版高效线程池
 
+## 知识速递
+
 ### 一、this指针
 
 `this`是C++中非静态成员函数里的一个隐藏函数，它指向调用当前成员函数的那个对象本身：谁调用函数，`this`就指向谁
@@ -545,7 +547,378 @@ int main()
 | `packaged_task+future` | 包装函数 + 获取函数返回值 | 线程池封装任务         | 调用任务自动回填结果 |
 | `async+future`         | 一键异步执行              | 简单异步任务           | 自动开线程执行       |
 
+### 六、`tuple`
+
+##### 定义
+
+作用就是打包一组数据；
+
+元组，能装任意多个、任意不同类型的数据容器
+
+长度固定，混放不同类型的元素
+
+##### 创建
+
+1.直接构造
+
+```c++
+tuple<int string,double> t(1,"张三",3.14);
+```
+
+2.`make_tuple`自动推导(数据类型)
+
+```c++
+auto t2=make_tuple(20,"李四",99.9);
+```
+
+3.花括号初始化
+
+```c++
+tuple<int,int>t3={5,6};
+```
+
+##### 特性
+
+1.取值`get<下标>`
+
+```c++
+cout<<get<0> (t);//下标从0开始
+```
+
+2.批量赋值`tie`
+
+```c++
+int a;string s;double d;
+tie(a,s,d)=t;
+```
+
+3.结构化绑定
+
+```c++
+auto [num,str,val]=make_tuple(10,"abc",5.5);//变量对象存入
+```
+
+4.`tuple_size<decltype(t)>::value;`获取元素个数
 
 
 
+### 七、`std::apply`
 
+##### 作用：把元组`tuple`的所有元素依次解包传入函数调用
+
+```c++
+std::apply(函数，元组)；
+```
+
+```c++
+void add(int a,int b){
+cout<<a+b<<endl;
+}
+int main(){
+auto t=make_tuple(3,5);
+apply(add,t);
+return 0;
+}
+```
+
+```c++
+//搭配lambda
+auto t=make_tuple(10,20,30);
+apply([](int x,int y,int z){cout<<x+y+z;},t);
+```
+
+### 八、`lambda`
+
+##### 格式
+
+[捕获列表]（参数列表）mutable->返回值类型{函数体}
+
+[]捕获：抓外部变量
+
+​	[]不捕获
+
+​	[=]值捕获
+
+​	[&]引用捕获
+
+​	[a]只捕获a值
+
+​	[&a]只捕获a引用
+
+`mutable`：值捕获也能修改副本
+
+->T :指定返回值，可省略自动推导
+
+##### 特性：
+
+1.值捕获默认不能改，加`mutable`可改脚本，不改原变量，用的是拷贝过来的旧值
+
+```c++
+int x=5;
+auto f=[=]()mutable{x=100;};
+f();//外面x还是5
+```
+
+2.`lambda`用外部变量有三类用法：
+
+值捕获、引用捕获、传参
+
+### 九、万能引用
+
+##### 定义：
+
+模板中`T&&`=万能引用，`int&&`->纯右值引用，万能引用既能接受左值也能接受右值
+
+完美转发的基础
+
+##### 推导规则：
+
+传左值：T推导成T&，左值引用
+
+传右值：T推导成T，右值引用
+
+#####  引用折叠
+
+```c++
+& + && -> &
+&& + && -> &&
+```
+
+只要有一个左值引用，结果一定是左值引用
+
+遇左则左，全右才右
+
+传入字面量T，代入得`T&&`，没有引用叠加，直接右值引用
+
+### 十、智能指针
+
+##### 作用：
+
+自动管理堆内存，无需手动`delete`，底层依靠引用计数/独占所有权自动析构
+
+##### 三大智能指针
+
+###### `std::unique_ptr`
+
+独占智能指针，独占所有权，同一个资源只能一个指针持有，不能拷贝，只能移动
+
+开销最小
+
+```c++
+auto 变量=make_unique<类型>(初始值);//模板函数make_unique干了两件事，在堆上new构造对象，打包返回unique_ptr
+unique_ptr<int> p1=make_unique<int> (10);
+unique_ptr<int> p2=move(p1);
+```
+
+###### `std::shared_ptr`
+
+共享智能指针，引用计数机制，多人共享同一块内存
+
+计数=0 自动释放内存
+
+可拷贝，可赋值
+
+```c++
+shared_ptr<int> p1(new int(10));//不推荐直接new构造，异常不安全
+```
+
+```c++
+auto p=make_shared<int>(666);//这里make_shared干了两件事，在堆上new构造对象，自动创建引用计数控制块，打包返回shared_ptr，一次性连续开辟两块内存：对象+控制块
+//make_shared优点：只分配一次内存，异常安全不会内存泄漏
+shared_ptr<int> p2=p;//计数+1
+cout<<p.use_count();//查看引用计数
+```
+
+###### `std::weak_ptr`
+
+弱指针，这里不做详细讲解
+
+## 线程池代码
+
+```c++
+#pragma once
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <vector>
+
+class pool {
+   private:
+    int thread_count;
+    std::queue<std::function<void()>>
+        works; 
+    std::vector<std::thread> thd;
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool runflag = true;
+
+   public:
+    pool(int n = 4) : thread_count(n) {
+        for (int i = 0; i < thread_count; ++i) {
+            thd.emplace_back([this]() {
+                while (true) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock<std::mutex> lock(mtx);
+                        cv.wait(lock,
+                                [this] { return !works.empty() || !runflag; });
+                        if (!runflag && works.empty())
+                            return;
+                        if (!works.empty()) {
+                            task = std::move(works.front());
+                            works.pop();
+                        }
+                    }
+                    if (task)
+                        task();
+                }
+            });
+        }
+    }
+
+    ~pool() {
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            runflag = false;
+        }
+        cv.notify_all();
+        for (auto& t : thd) {
+            if (t.joinable())
+                t.join();
+        }
+    }
+
+   public:
+    template <typename F, typename... Args>
+    auto enqueue(F&& f, Args&&... args)
+        -> std::future<typename std::invoke_result<F, Args...>::type> {
+        using return_type = typename std::invoke_result<F, Args...>::type;
+
+        auto task = std::make_shared<
+            std::packaged_task<return_type()>>([func = std::forward<F>(f),
+                                                args = std::make_tuple(
+                                                    std::forward<Args>(
+                                                        args)...)]() mutable {
+            return std::apply(
+                func,
+                args);  
+        });
+
+        std::future<return_type> res = task->get_future();
+
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            works.emplace([task]() { (*task)(); });  
+        }
+
+        cv.notify_one();
+        return res;
+    }
+};
+```
+
+核心成员变量：
+
+```c++
+int thread_count;                    // 线程数量
+std::queue<std::function<void()>> works;  // 任务队列（存“待执行函数”）
+std::vector<std::thread> thd;        // 线程池本体
+std::mutex mtx;                      // 保护队列
+std::condition_variable cv;          // 线程等待/唤醒
+bool runflag = true;                 // 线程池运行标记
+```
+
+任务队列用`function<void()>`:不管你丢什么任务，全部包装成无参无返回的函数，同一存储
+
+构造函数：
+
+```c++
+pool(int n = 4) : thread_count(n) {
+    for (int i = 0; i < thread_count; ++i) {
+        thd.emplace_back([this]() {  // 线程lambda
+            while (true) {
+                std::function<void()> task;
+
+                {
+                    std::unique_lock<std::mutex> lock(mtx);
+
+                    // 等待：有任务 或 线程池停止
+                    cv.wait(lock, [this] {
+                        return !works.empty() || !runflag;
+                    });
+
+                    // 退出条件：停止+无任务
+                    if (!runflag && works.empty())
+                        return;
+
+                    // 取任务
+                    task = std::move(works.front());
+                    works.pop();
+                }
+
+                // 解锁后执行任务（非常重要！）
+                if (task)
+                    task();
+            }
+        });
+    }
+}
+```
+
+`[this]()`捕获`this`:线程内部能访问县城池的队列、条件变量
+
+构造函数让线程具备"等待 - 取任务 - 执行"的能力
+
+没有任务->睡觉；有任务/要退出->醒过来
+
+`enqueue`提交任务：
+
+```c++
+ template <typename F, typename... Args>//接受任意类型的函数：可调用函数+任意数量参数
+    auto enqueue(F&& f, Args&&... args)//万能引用，可接收左值和右值
+        -> std::future<typename std::invoke_result<F, Args...>::type> {//std::invoke推导f的返回值类型,future是未来取结果的容器
+        // 这一步相当于定义了一个 “万能快递箱”，能装下任何类型的 “包裹（函数）”和 “配件（参数）”，还承诺会返回一个 “取件码（future）”
+        using return_type = typename std::invoke_result<F, Args...>::type;
+
+        // 使用 packaged_task 封装任务并绑定返回值
+        auto task = std::make_shared<
+            std::packaged_task<return_type()>>([func = std::forward<F>(f),
+                                                args = std::make_tuple(
+                                                    std::forward<Args>(
+                                                        args)...)]() mutable {
+            return std::apply(
+                func,
+                args);  // 把传入的可变参数（比如
+                        // 1,2）打包成一个std::tuple（元组），把元组args拆成单个参数，传给func执行
+        });
+
+        // 获取 future 对象，获取 future：给调用者返回 “取件码”
+        std::future<return_type> res = task->get_future();
+
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            works.emplace([task]() { (*task)(); });  // 将任务包装为 void() 类型
+        }
+
+        cv.notify_one();
+        return res;
+    }
+```
+
+作用：接受任意函数+任意参数->包装成任务->扔进任务队列->返回future让你拿结果
+
+`invoke_result<F,Args...>::type`:自动推导函数返回值类型
+
+这个函数主要干了什么？
+
+`invoke_result`推导返回值类型、`packaged_task`封装任务、获取`future`、`emplace`把任务扔给队列、唤醒一个线程来干活、返回`future`
+
+实现了提交任意函数->自动包装->线程执行->返回结果
+
+### 一句话串完线程池流程
+
+外部传入函数+可变参数——>万能引用接收——>完美转发打包tuple——>lambda捕获保存——>封装packaged_task生成future——>任务入队——>工作线程`cv`唤醒——>move取出任务——>apply解包执行——>主线程`future.get`获取结果
